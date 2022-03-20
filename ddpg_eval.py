@@ -10,6 +10,8 @@ import pickle
 import numpy as np
 from util import execute_transactions, quantize
 import matplotlib.pyplot as plt
+import re
+import pandas as pd
 
 class Actor(nn.Module):
 
@@ -307,6 +309,8 @@ def sharpe(x):
     return m / std
 
 def standard_deviation(x):
+    # if (x == 0).any():
+    #     import pdb; pdb.set_trace()
     x = x[1:] / x[:-1] - 1
     # m = x.mean()
     std = x.std()
@@ -319,13 +323,14 @@ def get_metrics(history, mean):
     # ratio of sharpe against the asset with highest mean return
     # ratio of std against the asset with highest mean return
     # std of the proportion of asset 1
+    # ratio of the net value of benchmark (half-half) against highest mean return
     if mean.max() > 0:
         idx = np.argmax(mean)
         prop = history[:, 2+idx].mean()
         value_ratio = history[-1, -2] / history[-1, idx]
         reward_diff = u_func(history[-1, -2]) - u_func(history[-1, idx])
-        sharpe_ratio = sharpe(history[:, -2]) / sharpe(history[:, 2+idx])
-        std_ratio = standard_deviation(history[:, -2]) / standard_deviation(history[:, 2+idx])
+        sharpe_ratio = sharpe(history[:, -2]) / sharpe(history[:, idx])
+        std_ratio = standard_deviation(history[:, -2]) / standard_deviation(history[:, idx])
     else:
         # cash prop
         prop = 1 - history[:, 2].mean() - history[:, 3].mean()
@@ -334,6 +339,7 @@ def get_metrics(history, mean):
         sharpe_ratio = 0
         std_ratio = np.inf
     prop_std = np.std(history[:, 2])
+    benchmark_ratio = history[-1, :2].mean() / history[-1, :2].max()
 
     metrics = {
         'prop': prop,
@@ -342,11 +348,13 @@ def get_metrics(history, mean):
         'sharpe_ratio': sharpe_ratio,
         'std_ratio': std_ratio,
         'prop_std': prop_std,
+        'benchmark_ratio': benchmark_ratio,
     }
     return metrics
 
 @torch.no_grad()
-def evaluate(actor, num, window_size):
+def evaluate(actor, num, window_size, seed=1234):
+    np.random.seed(seed)
     env = GBMEnvironment(utility_func=u_func, window_size=window_size, eval=True)
     results = {}
     for i in range(num):
@@ -357,7 +365,7 @@ def evaluate(actor, num, window_size):
             obs_, r, done, info_ = env.step(action.squeeze().tolist())
             if done:
                 break
-        history = env.history
+        history = np.stack(env.history)
         metrics = get_metrics(history, mu)
         for key, val in metrics.items():
             results[key] = results.get(key, []) + [val]
@@ -366,36 +374,35 @@ def evaluate(actor, num, window_size):
     return results
 
 actor = Actor(64).cuda()
-qnet = QNet(64).cuda()
-checkpoint = torch.load('results/ddpg/current_checkpoint_step_40000.pt')
-actor.load_state_dict(checkpoint['actor'])
-qnet.load_state_dict(checkpoint['qnet'])
-actor.eval()
-qnet.eval()
+# qnet = QNet(64).cuda()
+# checkpoint_list = [
+#     'results/ddpg/current_checkpoint_step_40000.pt',
+# ]
+checkpoint_list = []
+for dirpath, dirnames, files in os.walk('results/ddpg'):
+    for file in files:
+        if file.endswith('.pt'):
+            path = os.path.join(dirpath, file)
+            checkpoint_list.append(path)
+window_size = 100
+num = 10
 
-env = GBMEnvironment(utility_func=u_func, window_size=100, eval=True)
-reward = 0
-total_q = 0
-obs_ = env.reset()
-for i in range(env.num):
-    obs_ = torch.tensor(obs_).cuda().float()
-    action = actor(obs_.unsqueeze(0))
-    total_q += qnet(obs_.unsqueeze(0), action).item()
-    obs_, r, done, info_ = env.step(action.squeeze().tolist())
-    reward += r
-    if done:
-        break
+records = []
+print(f'Evaluating for {len(checkpoint_list)} models')
+for i, checkpoint_path in enumerate(checkpoint_list):
+    if (i + 1) % 5 == 0:
+        print(f'Evaluating model {i+1}')
+    step_num = re.search(r'step_(\d*).pt', checkpoint_path).group(1)
+    step_num = int(step_num)
+    checkpoint = torch.load(checkpoint_path)
+    actor.load_state_dict(checkpoint['actor'])
+    actor.eval()
+    result = evaluate(actor, num, window_size)
+    result['step_num'] = step_num
+    result['window_size'] = window_size
+    result['hidden_size'] = 64
+    records.append(result)
 
-result = np.stack(env.history)
-plt.subplot(211)
-plt.plot(result[:, 0], label='asset 1')
-plt.plot(result[:, 1], label='asset 2')
-plt.plot(result[:, -2], label='portfolio')
-plt.legend(loc='upper right')
-# plt.show()
-
-plt.subplot(212)
-plt.plot(result[:, 2], label='asset 1 weight')
-plt.plot(result[:, 3], label='asset 2 weight')
-plt.legend(loc='upper right')
-plt.show()
+df = pd.DataFrame.from_records(records)
+print(df)
+df.to_csv(f'results/ddpg/results-100-{1234}.csv', index=False)

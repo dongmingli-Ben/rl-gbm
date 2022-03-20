@@ -4,3 +4,9 @@ __pycache__
 train_gbm.py
 ppo.py
 ddpg_online.py
+test.py
+*.png
+*.csv
+*.gif
+*.xlsx
+zhihu.md
