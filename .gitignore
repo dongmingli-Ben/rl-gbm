@@ -1,12 +1,12 @@
 __pycache__
+figures
 *.pt
 *.txt
 train_gbm.py
 ppo.py
 ddpg_online.py
 test.py
-*.png
 *.csv
-*.gif
 *.xlsx
 zhihu.md
+zhihu*
